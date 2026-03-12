@@ -1,0 +1,1 @@
+globalThis.__RSC_MANIFEST=(globalThis.__RSC_MANIFEST||{});globalThis.__RSC_MANIFEST["/api/sharefile/route"]={"moduleLoading":{"prefix":"/_next/"},"ssrModuleMapping":{},"edgeSSRModuleMapping":{},"clientModules":{},"entryCSSFiles":{"C:\\Apps\\vercel-auth\\":[],"C:\\Apps\\vercel-auth\\app\\api\\sharefile\\route":[]},"rscModuleMapping":{},"edgeRscModuleMapping":{}}
