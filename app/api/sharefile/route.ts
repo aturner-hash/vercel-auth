@@ -50,19 +50,22 @@ export async function GET(req: NextRequest) {
     // Build authorize URL (classic ShareFile OAuth). If tenant is on Citrix Cloud,
     // ShareFile will redirect to auth.sharefile.io; we pass acr_values=tenant:<subdomain>
     // to skip the tenant entry screen.
-    const redirectUri = `${req.nextUrl.origin}/api/sharefile?action=callback`;
-    const auth = new URL('https://secure.sharefile.com/oauth/authorize');
-    auth.searchParams.set('response_type', 'code');
-    auth.searchParams.set('client_id', CLIENT_ID);
-    auth.searchParams.set('redirect_uri', redirectUri);
-    auth.searchParams.set('state', state);
-    auth.searchParams.set('code_challenge', challenge);
-    auth.searchParams.set('code_challenge_method', 'S256');
+    
+const base = process.env.SHAREFILE_SUBDOMAIN
+  ? `https://${process.env.SHAREFILE_SUBDOMAIN}.sharefile.com`
+  : 'https://secure.sharefile.com'; // fallback
 
-    // Tenant hint from env or optional query (?tenant=mysubdomain)
-    const tenantHint = TENANT || url.searchParams.get('tenant') || '';
-    if (tenantHint) {
-      auth.searchParams.set('acr_values', `tenant:${tenantHint}`);
+const auth = new URL(`${base}/oauth/authorize`);
+auth.searchParams.set('response_type', 'code');
+auth.searchParams.set('client_id', CLIENT_ID);
+auth.searchParams.set('redirect_uri', redirectUri);
+auth.searchParams.set('state', state);
+auth.searchParams.set('code_challenge', challenge);
+auth.searchParams.set('code_challenge_method', 'S256');
+
+// keep the tenant hint too
+const sub = process.env.SHAREFILE_SUBDOMAIN || '';
+if (sub) auth.searchParams.set('acr_values', `tenant:${sub}`);
     }
 
     // Minimal console trace
