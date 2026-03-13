@@ -99,4 +99,4 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     // Exchange code
-    const tokenRes = await fetch('https');}
+    const tokenRes = await fetch('https
