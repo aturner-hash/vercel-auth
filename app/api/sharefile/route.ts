@@ -1,27 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { webcrypto as nodeWebcrypto } from 'crypto';
 
-// ---- Types ----
-interface SessionPayload {
-  access_token: string;
-  refresh_token?: string;
-  expires_in?: number;
-  subdomain: string;
-}
-
+// -------------------- Types & runtime shims --------------------
 type CryptoLike = Crypto;
-
-// ---- Web Crypto (Node + Edge safe) ----
 const cryptoImpl: CryptoLike =
   (globalThis.crypto as CryptoLike) ?? (nodeWebcrypto as unknown as CryptoLike);
 
-// ---- Env ----
+// -------------------- Environment --------------------
 const CLIENT_ID = process.env.SHAREFILE_CLIENT_ID!;
 const CLIENT_SECRET = process.env.SHAREFILE_CLIENT_SECRET!;
-const SUB = process.env.SHAREFILE_SUBDOMAIN || '';
+const SUBDOMAIN = process.env.SHAREFILE_SUBDOMAIN || 'mtlawoffice';       // <-- your tenant (e.g., "mtlawoffice")
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || 'http://localhost:3000';
 
-// ---- Helpers ----
+// -------------------- Helpers --------------------
 function b64url(bytes: Uint8Array): string {
   return Buffer.from(bytes)
     .toString('base64')
@@ -31,10 +22,7 @@ function b64url(bytes: Uint8Array): string {
 }
 
 async function sha256(s: string): Promise<string> {
-  const digest = await cryptoImpl.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(s)
-  );
+  const digest = await cryptoImpl.subtle.digest('SHA-256', new TextEncoder().encode(s));
   return b64url(new Uint8Array(digest));
 }
 
@@ -44,24 +32,33 @@ function randomUrlSafe(len = 32): string {
   return b64url(u);
 }
 
-// simple in-memory store (use KV/Redis in prod)
+interface SessionPayload {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  subdomain: string;
+}
+
 const sessionStore = new Map<string, SessionPayload>();
 
+// -------------------- Route handler --------------------
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const url = new URL(req.url);
   const action = url.searchParams.get('action');
 
   if (action === 'start') {
-    const returnTo =
-      url.searchParams.get('return') || 'http://localhost:3000/oauth/callback';
+    const returnTo = url.searchParams.get('return') || 'http://localhost:3000/oauth/callback';
 
-    // Build PKCE
+    // PKCE
     const state = randomUrlSafe(16);
     const verifier = randomUrlSafe(64);
     const challenge = await sha256(verifier);
 
-    // Tenant-pinned authorize base
-    const base = SUB ? `https://${SUB}.sharefile.com` : 'https://secure.sharefile.com';
+    // Tenant-pinned authorize base (prevents portal client substitution)
+    const base = SUBDOMAIN
+      ? `https://${SUBDOMAIN}.sharefile.com`
+      : 'https://secure.sharefile.com';
+
     const redirectUri = `${req.nextUrl.origin}/api/sharefile?action=callback`;
 
     const auth = new URL(`${base}/oauth/authorize`);
@@ -72,10 +69,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     auth.searchParams.set('code_challenge', challenge);
     auth.searchParams.set('code_challenge_method', 'S256');
 
-    // Supply both hints to avoid tenant discovery / portal client substitution
-    if (SUB) {
-      auth.searchParams.set('acr_values', `tenant:${SUB}`);
-      auth.searchParams.set('subdomain', SUB);
+    // Hints to skip tenant entry even if identity forwards to Citrix OIDC
+    if (SUBDOMAIN) {
+      auth.searchParams.set('acr_values', `tenant:${SUBDOMAIN}`);
+      auth.searchParams.set('subdomain', SUBDOMAIN);
     }
 
     const res = NextResponse.redirect(auth.toString());
@@ -98,5 +95,75 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       return new NextResponse('Invalid or expired state', { status: 400 });
     }
 
-    // Exchange code
-    const tokenRes = await fetch('https
+    // Exchange authorization code for tokens
+    const tokenRes = await fetch('https://secure.sharefile.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        code,
+        redirect_uri: `${req.nextUrl.origin}/api/sharefile?action=callback`,
+        code_verifier: verifier,
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      const txt = await tokenRes.text();
+      return new NextResponse(
+        `Token exchange failed: ${tokenRes.status}\n${txt}`,
+        { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } }
+      );
+    }
+
+    const tok = await tokenRes.json() as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in?: number;
+      subdomain?: string;
+    };
+
+    const sub = tok.subdomain || SUBDOMAIN || '';
+    if (!sub) return new NextResponse('Missing subdomain in token/callback', { status: 400 });
+
+    const sid = randomUrlSafe(24);
+    sessionStore.set(sid, {
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token,
+      expires_in: tok.expires_in,
+      subdomain: sub,
+    });
+
+    const back = new URL(returnTo);
+    back.searchParams.set('session', sid);
+
+    const res = NextResponse.redirect(back.toString());
+    res.cookies.delete('sf_oauth_state');
+    res.cookies.delete('sf_oauth_verifier');
+    res.cookies.delete('sf_return_to');
+    return res;
+  }
+
+  if (action === 'session') {
+    const id = url.searchParams.get('id') || '';
+    const data = sessionStore.get(id);
+    if (!data) return new NextResponse('Not found', { status: 404 });
+
+    const res = NextResponse.json(data);
+    res.headers.set('Access-Control-Allow-Origin', ALLOW_ORIGIN);
+    res.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+    return res;
+  }
+
+  return new NextResponse('Not Found', { status: 404 });
+}
+
+export async function OPTIONS(): Promise<NextResponse> {
+  const res = new NextResponse(null, { status: 204 });
+  res.headers.set('Access-Control-Allow-Origin', ALLOW_ORIGIN);
+  res.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+  return res;
+}
